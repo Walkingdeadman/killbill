@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KillBill记账</string>
+    <string name="channel_name">悬浮球服务</string>
+    <string name="ball_desc">记账悬浮球</string>
+</resources>
