@@ -49,6 +49,26 @@ class BillRepository(
         )
     )
 
+    /** 相册批量导入入库：用户已在确认页核对/改过的字段原样写入，source 标记 PHOTO */
+    suspend fun insertImported(
+        amountCents: Long,
+        type: TxType,
+        categoryId: Long,
+        merchant: String?,
+        note: String?,
+        txTime: Long,
+    ): Long = txDao.insert(
+        TransactionEntity(
+            amountCents = amountCents,
+            type = type.name,
+            categoryId = categoryId,
+            merchant = merchant?.takeIf { it.isNotBlank() },
+            note = note?.takeIf { it.isNotBlank() },
+            txTime = txTime,
+            source = "PHOTO",
+        )
+    )
+
     suspend fun update(tx: TransactionEntity) = txDao.update(tx)
     suspend fun delete(tx: TransactionEntity) = txDao.delete(tx)
     suspend fun byId(id: Long) = txDao.byId(id)

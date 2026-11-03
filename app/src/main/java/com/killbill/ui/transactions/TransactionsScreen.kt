@@ -1,5 +1,10 @@
 package com.killbill.ui.transactions
 
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -18,8 +23,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -29,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +44,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -64,72 +73,136 @@ fun TransactionsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
     var editing by remember { mutableStateOf<TransactionEntity?>(null) }
     var adding by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<TransactionEntity?>(null) }
+    var editingImport by remember { mutableStateOf<ImageImportRow?>(null) }
+    val context = LocalContext.current
 
-    val grouped = remember(transactions) {
-        transactions.groupBy {
-            YearMonth.from(Instant.ofEpochMilli(it.txTime).atZone(ZoneId.systemDefault()))
-        }.toSortedMap(compareByDescending { it })
+    // 相册批量导入：系统 Photo Picker 多选，无需额外相册权限。
+    // 选完立即进确认页跑本地 OCR，用户核对后才入库。
+    val pickerContract = remember {
+        ActivityResultContracts.PickMultipleVisualMedia(MAX_BATCH_IMPORT)
+    }
+    val importPicker = rememberLauncherForActivityResult(pickerContract) { uris ->
+        if (uris.isNotEmpty()) {
+            // API 33+ 由系统 picker 限张数；老系统走 OPEN_DOCUMENT 不限，这里兜底并告知
+            if (uris.size > MAX_BATCH_IMPORT) {
+                Toast.makeText(
+                    context,
+                    "一次最多导入 $MAX_BATCH_IMPORT 张，已取前 $MAX_BATCH_IMPORT 张",
+                    Toast.LENGTH_LONG,
+                ).show()
+            }
+            vm.startImageImport(uris)
+        }
     }
 
-    Box(modifier = modifier.fillMaxSize()) {
-        if (transactions.isEmpty()) {
-            Column(
-                Modifier.fillMaxSize(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Text("还没有账目", fontSize = 16.sp, color = TextGray)
-                Spacer(Modifier.height(6.dp))
-                Text("点右下角 + 手动记一笔，或去屏幕上点悬浮球", fontSize = 13.sp, color = TextGray)
-            }
-        } else {
-            LazyColumn(Modifier.fillMaxSize()) {
-                grouped.forEach { (month, list) ->
-                    item(key = "header_$month") {
-                        MonthHeader(month, list)
-                    }
-                    items(list, key = { it.id }) { tx ->
-                        val dismissState = rememberSwipeToDismissBoxState(
-                            confirmValueChange = { value ->
-                                if (value == SwipeToDismissBoxValue.EndToStart) {
-                                    pendingDelete = tx
-                                }
-                                false // 永远不真的滑没，弹确认框
-                            }
-                        )
-                        SwipeToDismissBox(
-                            state = dismissState,
-                            enableDismissFromStartToEnd = false,
-                            backgroundContent = {
-                                Box(
-                                    Modifier
-                                        .fillMaxSize()
-                                        .background(ExpenseRed.copy(alpha = 0.15f))
-                                        .padding(horizontal = 20.dp),
-                                    contentAlignment = Alignment.CenterEnd
-                                ) {
-                                    Icon(Icons.Filled.Delete, contentDescription = "删除", tint = ExpenseRed)
-                                }
-                            }
-                        ) {
-                            TxRow(
-                                tx = tx,
-                                category = catMap[tx.categoryId],
-                                onClick = { editing = tx },
-                            )
-                        }
-                    }
-                }
-                item { Spacer(Modifier.height(88.dp)) }
-            }
+    val importResult = vm.importResult
+    LaunchedEffect(importResult) {
+        if (importResult != null) {
+            Toast.makeText(context, importResult, Toast.LENGTH_SHORT).show()
+            vm.clearImportResult()
+        }
+    }
+
+    val importState = vm.batchImport
+    BackHandler(enabled = importState.visible) { vm.dismissImageImport() }
+
+    if (importState.visible) {
+        BatchImportScreen(
+            state = importState,
+            categories = categories,
+            onToggle = { id, checked -> vm.toggleImportRow(id, checked) },
+            onEdit = { editingImport = it },
+            onConfirm = { vm.confirmImageImport() },
+            onDismiss = { vm.dismissImageImport() },
+            modifier = modifier,
+        )
+    } else {
+        val grouped = remember(transactions) {
+            transactions.groupBy {
+                YearMonth.from(Instant.ofEpochMilli(it.txTime).atZone(ZoneId.systemDefault()))
+            }.toSortedMap(compareByDescending { it })
         }
 
-        FloatingActionButton(
-            onClick = { adding = true },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
-            containerColor = MaterialTheme.colorScheme.primary,
-        ) {
-            Icon(Icons.Filled.Add, contentDescription = "手动记一笔", tint = Color.White)
+        Box(modifier = modifier.fillMaxSize()) {
+            if (transactions.isEmpty()) {
+                Column(
+                    Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text("还没有账目", fontSize = 16.sp, color = TextGray)
+                    Spacer(Modifier.height(6.dp))
+                    Text("点右下角 + 手动记一笔，或「相册导入」批量识别", fontSize = 13.sp, color = TextGray)
+                }
+            } else {
+                LazyColumn(Modifier.fillMaxSize()) {
+                    grouped.forEach { (month, list) ->
+                        item(key = "header_$month") {
+                            MonthHeader(month, list)
+                        }
+                        items(list, key = { it.id }) { tx ->
+                            val dismissState = rememberSwipeToDismissBoxState(
+                                confirmValueChange = { value ->
+                                    if (value == SwipeToDismissBoxValue.EndToStart) {
+                                        pendingDelete = tx
+                                    }
+                                    false // 永远不真的滑没，弹确认框
+                                }
+                            )
+                            SwipeToDismissBox(
+                                state = dismissState,
+                                enableDismissFromStartToEnd = false,
+                                backgroundContent = {
+                                    Box(
+                                        Modifier
+                                            .fillMaxSize()
+                                            .background(ExpenseRed.copy(alpha = 0.15f))
+                                            .padding(horizontal = 20.dp),
+                                        contentAlignment = Alignment.CenterEnd
+                                    ) {
+                                        Icon(Icons.Filled.Delete, contentDescription = "删除", tint = ExpenseRed)
+                                    }
+                                }
+                            ) {
+                                TxRow(
+                                    tx = tx,
+                                    category = catMap[tx.categoryId],
+                                    onClick = { editing = tx },
+                                )
+                            }
+                        }
+                    }
+                    item { Spacer(Modifier.height(148.dp)) }
+                }
+            }
+
+            Column(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                ExtendedFloatingActionButton(
+                    onClick = {
+                        runCatching {
+                            importPicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                            )
+                        }.onFailure {
+                            Toast.makeText(context, "打不开相册选图", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    icon = { Icon(Icons.Filled.PhotoLibrary, contentDescription = null) },
+                    text = { Text("相册导入") },
+                )
+                FloatingActionButton(
+                    onClick = { adding = true },
+                    containerColor = MaterialTheme.colorScheme.primary,
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = "手动记一笔", tint = Color.White)
+                }
+            }
         }
     }
 
@@ -140,6 +213,27 @@ fun TransactionsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
             categories = categories,
             onSave = { updated -> vm.updateTx(updated); editing = null },
             onDismiss = { editing = null },
+        )
+    }
+
+    // 批量导入：点某一行补全/核对
+    editingImport?.let { row ->
+        TxEditDialog(
+            initial = row.toEditableTransaction(),
+            categories = categories,
+            title = if (row.recognized) "核对识别结果" else "补全这一笔",
+            onSave = { tx ->
+                vm.updateImportRow(
+                    id = row.id,
+                    type = TxType.valueOf(tx.type),
+                    amountCents = tx.amountCents,
+                    categoryId = tx.categoryId,
+                    merchant = tx.merchant,
+                    note = tx.note,
+                )
+                editingImport = null
+            },
+            onDismiss = { editingImport = null },
         )
     }
 
@@ -178,6 +272,7 @@ fun TransactionsScreen(vm: AppViewModel, modifier: Modifier = Modifier) {
         )
     }
 }
+
 
 @Composable
 private fun MonthHeader(month: YearMonth, list: List<TransactionEntity>) {
@@ -245,7 +340,7 @@ private fun TxRow(
                 category?.name,
                 tx.note?.takeIf { it.isNotBlank() && it != tx.merchant },
                 time.format(fmt),
-                if (tx.source == "CAPTURE") "截屏" else "手动"
+                if (tx.source == "CAPTURE") "截屏" else if (tx.source == "PHOTO") "相册" else "手动"
             ).joinToString(" · ")
             Text(sub, fontSize = 11.sp, color = TextGray, maxLines = 1)
         }
