@@ -35,12 +35,25 @@ object TextBillParser {
 
     private val INCOME_SIGNALS = listOf("退款", "收入", "工资", "薪资", "奖金", "红包", "理财收益", "利息")
 
-    private val MERCHANT_LABELS = listOf("收款方全称", "收款方", "商户名称", "交易商户", "商家名称", "商家")
+    private val MERCHANT_LABELS = listOf(
+        "收款方全称", "收款方", "商户全称", "商户名称", "交易商户", "商家名称", "商家"
+    )
+
+    /** 金额行上方紧邻的短标题不能当商户名的 UI 文案（微信/支付宝商家名→金额版式） */
+    private val MERCHANT_TITLE_BLOCKLIST = listOf(
+        "账单", "详情", "全部账单", "当前状态", "支付成功", "付款成功", "交易成功",
+        "扣款成功", "自动扣款", "付款方式", "商品", "支付时间", "乘车时间",
+        "收单机构", "商户单号", "交易单号", "账单分类", "温馨提示", "推荐服务",
+        "查看行程", "去查看", "更多", "标签", "请选择", "为您推荐", "支付宝",
+        "微信", "云闪付", "零钱", "积分", "奖励", "金额", "收款", "付款", "服务",
+        "实付", "合计", "应付", "订单",
+    )
 
     private val moneyWithSymbol = Regex("[¥￥]\\s*([+-]?\\d+(?:\\.\\d{1,2})?)")
     private val moneyWithYuan = Regex("([+-]?\\d+(?:\\.\\d{1,2})?)\\s*元")
     private val moneyBare = Regex("^([+-]?\\d+\\.\\d{1,2})$")
-    private val dateTimeFull = Regex("(\\d{4})-(\\d{1,2})-(\\d{1,2})\\s+(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
+    private val dateTimeFull = Regex("(\\d{4})-(\\d{1,2})-(\\d{1,2})\\s*(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
+    private val dateTimeCnFull = Regex("(\\d{4})年(\\d{1,2})月(\\d{1,2})日\\s*(\\d{1,2}):(\\d{2})(?::(\\d{2}))?")
     private val dateTimeCn = Regex("(\\d{1,2})月(\\d{1,2})日\\s*(\\d{1,2}):(\\d{2})")
 
     fun parse(lines: List<String>): Parsed? {
@@ -121,13 +134,14 @@ object TextBillParser {
     }
 
     private fun pickMerchant(lines: List<String>, amountIdx: Int): String? {
-        // 1) "收款方/交易商户"标签：金额行之后的优先（银行动账通知版式），否则取最后一个
+        // 1) "收款方/商户全称"等标签：优先取同一行冒号/空格后的值，标签独占一行则取下一行
         val labeled = lines.mapIndexedNotNull { i, l ->
-            val label = MERCHANT_LABELS.firstOrNull { l.startsWith(it) || l.contains("：$it") || l.contains(": $it") }
+            val label = MERCHANT_LABELS.firstOrNull {
+                l.startsWith(it) || l.contains("：$it") || l.contains(": $it")
+            }
             if (label == null) null else {
-                val inline = l.substringAfter("：", l.substringAfter(":", "")).trim()
-                val value = if (inline.isNotEmpty() && inline != l.trim()) inline
-                else lines.getOrNull(i + 1)?.trim()
+                val value = valueAfterLabel(l, label)
+                    ?: lines.getOrNull(i + 1)?.trim()
                 if (value.isNullOrBlank()) null else (i to value)
             }
         }
@@ -148,12 +162,52 @@ object TextBillParser {
         lines.take(amountIdx).lastOrNull { l ->
             l.length in 3..20 && merchantWords.any { l.contains(it) }
         }?.let { return it.trim() }
+        // 4) 金额行上方紧邻的短标题（支付宝/微信账单常见：商家名 → 金额）
+        lines.getOrNull(amountIdx - 1)?.trim()?.let { above ->
+            if (looksLikeMerchantTitle(above)) return above
+        }
         return null
+    }
+
+    /**
+     * 标签行取值：兼容 "商户全称：xxx"、"支付时间: xxx"，以及真实账单里常见的
+     * "商户全称 xxx"（标签与值之间只有空格）。取不到返回 null，交给下一行兜底。
+     */
+    private fun valueAfterLabel(line: String, label: String): String? {
+        val idx = line.indexOf(label)
+        if (idx < 0) return null
+        val rest = line.substring(idx + label.length).trim()
+        val cleaned = rest.removePrefix("：").removePrefix(":").trim()
+        return cleaned.takeIf { it.isNotEmpty() && it != line.trim() }
+    }
+
+    /** 金额上方那行是不是可当商户名的短标题；过滤"全部账单/支付成功"等 UI 文案 */
+    private fun looksLikeMerchantTitle(line: String): Boolean {
+        val t = line.trim()
+        if (t.length !in 2..25) return false
+        if (t.startsWith("¥") || t.startsWith("￥")) return false
+        if (t.endsWith("：") || t.endsWith(":")) return false
+        if (dateTimeFull.containsMatchIn(t) || dateTimeCnFull.containsMatchIn(t) ||
+            dateTimeCn.containsMatchIn(t)
+        ) return false
+        if (t.any { it.isDigit() } && t.none { it.isLetter() }) return false
+        if (MERCHANT_TITLE_BLOCKLIST.any { t.contains(it) }) return false
+        return true
     }
 
     private fun pickTime(lines: List<String>): Long? {
         for (line in lines) {
             dateTimeFull.find(line)?.let { m ->
+                val (y, mo, d, h, mi) = listOf(1, 2, 3, 4, 5).map { m.groupValues[it].toInt() }
+                val s = m.groupValues.getOrNull(6)?.toIntOrNull() ?: 0
+                return runCatching {
+                    LocalDateTime.of(y, mo, d, h, mi, s)
+                        .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
+                }.getOrNull()
+            }
+        }
+        for (line in lines) {
+            dateTimeCnFull.find(line)?.let { m ->
                 val (y, mo, d, h, mi) = listOf(1, 2, 3, 4, 5).map { m.groupValues[it].toInt() }
                 val s = m.groupValues.getOrNull(6)?.toIntOrNull() ?: 0
                 return runCatching {
@@ -179,8 +233,7 @@ object TextBillParser {
         lines.forEachIndexed { i, l ->
             val label = labels.firstOrNull { l.startsWith(it) || l.contains("：$it") }
             if (label != null) {
-                val inline = l.substringAfter("：", "").trim()
-                if (inline.isNotEmpty()) return inline
+                valueAfterLabel(l, label)?.let { return it }
                 lines.getOrNull(i + 1)?.trim()?.takeIf { it.isNotBlank() }?.let { return it }
             }
         }

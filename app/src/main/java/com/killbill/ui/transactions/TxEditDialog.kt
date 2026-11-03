@@ -43,6 +43,8 @@ fun TxEditDialog(
     categories: List<CategoryEntity>,
     onSave: (TransactionEntity) -> Unit,
     onDismiss: () -> Unit,
+    /** 覆盖标题；批量导入核对/补全时用 */
+    title: String? = null,
 ) {
     var type by remember {
         mutableStateOf(if (initial?.type == "INCOME") TxType.INCOME else TxType.EXPENSE)
@@ -76,7 +78,7 @@ fun TxEditDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (initial == null) "手动记一笔" else "编辑账目") },
+        title = { Text(title ?: if (initial == null) "手动记一笔" else "编辑账目") },
         text = {
             Column(
                 Modifier.verticalScroll(rememberScrollState()),

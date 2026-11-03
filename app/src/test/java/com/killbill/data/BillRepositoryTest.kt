@@ -69,4 +69,40 @@ class BillRepositoryTest {
         assertEquals("测试商家", saved.merchant)
         assertEquals("CAPTURE", saved.source)
     }
+
+    @Test
+    fun `相册批量导入入库_source标记PHOTO且字段原样`() = runBlocking {
+        val id = repo.insertImported(
+            amountCents = 2599,
+            type = TxType.INCOME,
+            categoryId = foodId,
+            merchant = "退款",
+            note = "订单取消",
+            txTime = 1_700_000_000_000L,
+        )
+        assertTrue(id > 0)
+        val saved = db.transactionDao().byId(id)!!
+        assertEquals(2599L, saved.amountCents)
+        assertEquals("INCOME", saved.type)
+        assertEquals(foodId, saved.categoryId)
+        assertEquals("退款", saved.merchant)
+        assertEquals("订单取消", saved.note)
+        assertEquals(1_700_000_000_000L, saved.txTime)
+        assertEquals("PHOTO", saved.source)
+    }
+
+    @Test
+    fun `相册导入空商家备注不入库为空串`() = runBlocking {
+        val id = repo.insertImported(
+            amountCents = 100,
+            type = TxType.EXPENSE,
+            categoryId = otherId,
+            merchant = "   ",
+            note = "",
+            txTime = 1L,
+        )
+        val saved = db.transactionDao().byId(id)!!
+        assertEquals(null, saved.merchant)
+        assertEquals(null, saved.note)
+    }
 }
